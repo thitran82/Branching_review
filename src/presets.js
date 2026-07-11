@@ -45,7 +45,7 @@ export const PRESETS = {
 
 // The seed used throughout the manuscript.
 export const DEFAULT_SEED = {
-  query: "10.25300/MISQ/2013/37.2.02",
+  query: "10.25300/MISQ/2013/37.2.05",
   label: "Oh, Agrawal & Rao (2013) — MIS Quarterly",
 };
 
