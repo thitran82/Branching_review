@@ -2,7 +2,7 @@ import React, { useState, useMemo, useCallback } from "react";
 import { PRESETS, DEFAULT_SEED, DEFAULT_KEYWORDS } from "./presets";
 
 // ---------------------------------------------------------------------------
-// Branching Review — a two-branch literature scan on OpenAlex.
+// Branching Review — a two-branch literature scan using OpenAlex and/or Scopus.
 // Depth branch: papers citing a seed, within a journal basket.
 // Breadth branch: papers matching a keyword phrase, within the same basket.
 // The intersection is the convergent core.
@@ -20,8 +20,9 @@ export default function App() {
 
   const [keywords, setKeywords] = useState(DEFAULT_KEYWORDS);
   const [journals, setJournals] = useState(flatPreset(ALL_GROUPS));
-  const [yearFrom, setYearFrom] = useState(2013);
-  const [yearTo, setYearTo] = useState(new Date().getFullYear());
+  const [yearFrom, setYearFrom] = useState(2014);
+  const [yearTo, setYearTo] = useState(2026);
+  const [sourceMode, setSourceMode] = useState("openalex");
 
   const [runDepth, setRunDepth] = useState(true);
   const [runBreadth, setRunBreadth] = useState(true);
@@ -85,6 +86,10 @@ export default function App() {
   }, [jInput]);
 
   const addJournal = (m) => {
+    if (m.type && m.type !== "journal") {
+      setError(`Cannot add ${m.name}: OpenAlex classifies it as ${m.type}, not a journal.`);
+      return;
+    }
     const issn = m.issn_l || (m.issns && m.issns[0]);
     if (!issn) return;
     if (journals.some((j) => j.issn === issn)) return;
@@ -122,8 +127,11 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           seedId: seed ? seed.id : null,
+          seedMetadata: seed,
+          sourceMode,
           keywords,
           issns,
+          journals,
           yearFrom,
           yearTo,
           runDepth,
@@ -141,29 +149,56 @@ export default function App() {
     } finally {
       setRunning(false);
     }
-  }, [issns, seed, keywords, yearFrom, yearTo, runDepth, runBreadth]);
+  }, [issns, journals, seed, sourceMode, keywords, yearFrom, yearTo, runDepth, runBreadth]);
 
   // --- export -------------------------------------------------------------
   const exportCsv = () => {
     if (!results) return;
     const rows = [
-      ["group", "title", "authors", "year", "venue", "doi", "cited_by"],
+      ["group", "sources", "title", "authors", "year", "venue", "raw_venue", "type", "source_type", "doi", "openalex_cited_by", "scopus_cited_by", "scopus_url", "metadata_warnings", "exclusion_reasons"],
     ];
     const push = (list, label) =>
       list.forEach((w) =>
         rows.push([
           label,
+          (w.sources || []).join("+"),
           w.title,
           w.authors.join("; "),
           w.year || "",
           w.venue || "",
+          w.raw_venue || "",
+          w.type || "",
+          w.source_type || "",
           w.doi || "",
-          w.cited_by,
+          (w.citationCounts && w.citationCounts.OpenAlex) ?? "",
+          (w.citationCounts && w.citationCounts.Scopus) ?? "",
+          w.scopusUrl || "",
+          (w.metadataWarnings || []).join("; "),
+          "",
         ])
       );
     push(results.overlap, "overlap");
     push(results.depthOnly, "depth-only");
     push(results.breadthOnly, "breadth-only");
+    (results.excluded || []).forEach((w) =>
+      rows.push([
+        `excluded:${w.branch || "unknown"}`,
+        w.source || "",
+        w.title || "",
+        "",
+        w.year || "",
+        "",
+        "",
+        "",
+        "",
+        w.doi || "",
+        "",
+        "",
+        "",
+        (w.warnings || []).join("; "),
+        (w.reasons || []).join("; "),
+      ])
+    );
     const csv = rows
       .map((r) =>
         r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")
@@ -245,6 +280,12 @@ export default function App() {
 
   const activeSynth = synth[tab];
 
+  const paperHref = (w) =>
+    w.url ||
+    (w.doi ? (String(w.doi).startsWith("http") ? w.doi : `https://doi.org/${w.doi}`) : null) ||
+    (String(w.id || "").startsWith("http") ? w.id : null) ||
+    "#";
+
   return (
     <div className="wrap">
       <header className="masthead">
@@ -269,6 +310,20 @@ export default function App() {
       <main className="grid">
         {/* ---------------- controls ---------------- */}
         <section className="panel controls">
+          <div className="block">
+            <h2>Live data source</h2>
+            <select className="field" value={sourceMode} onChange={(e) => setSourceMode(e.target.value)}>
+              <option value="openalex">OpenAlex</option>
+              <option value="scopus">Scopus</option>
+              <option value="both">OpenAlex + Scopus</option>
+            </select>
+            <p className="hint">
+              Scopus mode uses the official Elsevier Scopus Search API from the server. Configure
+              SCOPUS_API_KEY in Vercel; subscriber-level access may also require SCOPUS_INSTTOKEN.
+              Live Scopus is still not a historical replay of the archived review exports.
+            </p>
+          </div>
+
           {/* seed */}
           <div className="block">
             <div className="block-head">
@@ -292,7 +347,7 @@ export default function App() {
                 value={seedInput}
                 onChange={(e) => setSeedInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && resolveSeed()}
-                placeholder="10.25300/MISQ/2013/37.2.02"
+                placeholder="10.25300/MISQ/2013/37.2.05"
               />
               <button className="btn ghost" onClick={resolveSeed}>
                 Resolve
@@ -310,6 +365,7 @@ export default function App() {
                 <span>
                   {seed.authors.join(", ")}
                   {seed.year ? ` · ${seed.year}` : ""}
+                  {seed.doi ? ` · ${seed.doi.replace(/^https?:\/\/doi\.org\//i, "")}` : ""}
                 </span>
               </div>
             )}
@@ -330,14 +386,14 @@ export default function App() {
               </label>
             </div>
             <p className="hint">
-              Papers matching this phrase in title, abstract, or full text,
-              inside the same journal set.
+              Strict breadth rule over title, abstract, and keywords. Space/AND means required; | means OR.
+              Example: rumor|rumour misinformation.
             </p>
             <input
               className="field"
               value={keywords}
               onChange={(e) => setKeywords(e.target.value)}
-              placeholder="rumor misinformation"
+              placeholder="rumor|rumour misinformation"
             />
           </div>
 
@@ -406,7 +462,7 @@ export default function App() {
                     <strong>{m.name}</strong>
                     <span>
                       {(m.issn_l || (m.issns && m.issns[0]) || "no ISSN")} ·{" "}
-                      {m.works.toLocaleString()} works
+                      {m.type || "unknown type"} · {m.works.toLocaleString()} works
                     </span>
                   </button>
                 </li>
@@ -464,7 +520,7 @@ export default function App() {
           {running && (
             <div className="empty">
               <div className="pulse" />
-              <p>Querying OpenAlex across both branches…</p>
+              <p>Querying the selected live source(s) across both branches…</p>
             </div>
           )}
 
@@ -473,7 +529,7 @@ export default function App() {
               <div className="venn">
                 <Stat
                   label="Depth only"
-                  sub="cite seed, off-topic"
+                  sub="cites seed; not breadth-matched"
                   n={results.counts.depthOnly}
                   cls="depth"
                   active={tab === "depthOnly"}
@@ -481,7 +537,7 @@ export default function App() {
                 />
                 <Stat
                   label="Convergent core"
-                  sub="cite seed & on-topic"
+                  sub="retrieved by both branches"
                   n={results.counts.overlap}
                   cls="core"
                   active={tab === "overlap"}
@@ -489,13 +545,42 @@ export default function App() {
                 />
                 <Stat
                   label="Breadth only"
-                  sub="on-topic, cite elsewhere"
+                  sub="breadth-matched; outside seed lineage"
                   n={results.counts.breadthOnly}
                   cls="breadth"
                   active={tab === "breadthOnly"}
                   onClick={() => setTab("breadthOnly")}
                 />
               </div>
+
+              {results.diagnostics && (
+                <div className="note">
+                  Live source mode: {results.diagnostics.sourceMode}.{" "}
+                  {results.diagnostics.openalex && (
+                    <>OpenAlex — depth raw {results.diagnostics.openalex.depthRaw}; breadth Boolean candidates {results.diagnostics.openalex.breadthBooleanCandidates}; breadth after strict metadata match {results.diagnostics.openalex.breadthAfterStrictMetadataMatch}. </>
+                  )}
+                  {results.diagnostics.scopus && (
+                    <>Scopus — depth {results.diagnostics.scopus.depthRaw}; breadth {results.diagnostics.scopus.breadthRaw}; auth {results.diagnostics.scopus.credentialMode}. </>
+                  )}
+                  Excluded by metadata/type validation: {results.diagnostics.excludedByEligibilityGate}.
+                  {results.diagnostics.warning ? ` ${results.diagnostics.warning}` : ""}
+                </div>
+              )}
+
+              {results.excluded && results.excluded.length > 0 && (
+                <details className="howkey">
+                  <summary>Inspect {results.excluded.length} records excluded by metadata/type validation</summary>
+                  <ul className="paperlist">
+                    {results.excluded.slice(0, 100).map((w, i) => (
+                      <li key={`${w.id || w.doi || w.title}-${i}`} className="paper">
+                        <strong>{w.title}</strong>
+                        <div className="pmeta dim">{w.source ? `${w.source} · ` : ""}{w.branch} · {w.year || "—"}</div>
+                        <div className="note err">{(w.reasons || []).join("; ")}</div>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
 
               <div className="results-head">
                 <div className="viewtabs">
@@ -528,7 +613,7 @@ export default function App() {
                   {activeList.map((w) => (
                     <li key={w.id} className="paper">
                       <a
-                        href={w.doi || w.id}
+                        href={paperHref(w)}
                         target="_blank"
                         rel="noreferrer"
                         className="ptitle"
@@ -542,11 +627,27 @@ export default function App() {
                       <div className="pmeta dim">
                         <span>{w.venue || "—"}</span>
                         <span>· {w.year || "—"}</span>
-                        <span>· cited {w.cited_by}×</span>
+                        {(w.sources || []).length > 0 && <span>· {(w.sources || []).join(" + ")}</span>}
+                        {w.citationCounts && w.citationCounts.OpenAlex !== undefined && (
+                          <span>· OpenAlex cited {w.citationCounts.OpenAlex}×</span>
+                        )}
+                        {w.citationCounts && w.citationCounts.Scopus !== undefined && (
+                          w.scopusUrl ? (
+                            <a href={w.scopusUrl} target="_blank" rel="noreferrer">· Scopus cited {w.citationCounts.Scopus}×</a>
+                          ) : (
+                            <span>· Scopus cited {w.citationCounts.Scopus}×</span>
+                          )
+                        )}
                         {w.primaryTopic && (
                           <span className="topictag">{w.primaryTopic.name}</span>
                         )}
                       </div>
+                      {w.raw_venue && w.raw_venue !== w.venue && (
+                        <div className="pmeta dim">Raw source: {w.raw_venue}</div>
+                      )}
+                      {w.metadataWarnings && w.metadataWarnings.length > 0 && (
+                        <div className="note err">Metadata warning: {w.metadataWarnings.join("; ")}</div>
+                      )}
                     </li>
                   ))}
                   {activeList.length === 0 && (
@@ -560,6 +661,7 @@ export default function App() {
 
               {view === "breakdown" && activeBreakdown && (
                 <div className="breakdown">
+                  <p className="note">Topic/domain labels are descriptive metadata diagnostics only (currently populated primarily from OpenAlex); they do not independently validate the review's four lifecycle themes.</p>
                   {activeList.length === 0 ? (
                     <p className="empty-list">No papers in this group.</p>
                   ) : (
@@ -694,12 +796,12 @@ export default function App() {
       </main>
 
       <footer className="foot">
-        Data from{" "}
-        <a href="https://openalex.org" target="_blank" rel="noreferrer">
-          OpenAlex
-        </a>
-        . This is a first-pass scan, not a substitute for a full PRISMA review —
-        treat the results as a scaffold to screen by hand.
+        Live metadata may come from{" "}
+        <a href="https://openalex.org" target="_blank" rel="noreferrer">OpenAlex</a>{" "}
+        and/or{" "}
+        <a href="https://www.scopus.com" target="_blank" rel="noreferrer">Scopus</a>.{" "}
+        These live modes are discovery/validation scaffolds, not the historical WoS+Scopus corpus replay.
+        Eligibility gates and strict topic matching reduce noise, but final inclusion still requires researcher screening.
       </footer>
     </div>
   );
