@@ -48,8 +48,7 @@ export const PRESETS = {
     { name: "Government Information Quarterly", issn: "0740-624X" },
     { name: "Internet Research", issn: "1066-2243" },
     { name: "Information Processing & Management", issn: "0306-4573" },
-    { name: "Telematics and Informatics", issn: "0736-5853" },
-    { name: "Information Systems Frontiers", issn: "1387-3326" },
+    { name: "Telematics and Informatics", issn: "0736-5853" },    
   ],
 };
 
